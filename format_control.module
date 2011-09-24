@@ -1,0 +1,433 @@
+<?php
+
+/**
+ * @file
+ * Enhances Drupal's core input format settings.
+ */
+
+/**
+ * Implements hook_theme()
+ */
+function format_control_theme() {
+  return array(
+    'format_control_filter_table' => array(
+      'render element' => 'form',
+      'file' => 'format_control.theme.inc'
+    )
+  );
+}
+
+/**
+ * Implements of hook_perm().
+ */
+function format_control_permission() {
+  $entities = entity_get_info();
+
+  $perms = array(
+    'show format tips' => array(
+      'title' => t('Show format tips'),
+      'description' => t('Toggle display of format description help.'),
+    ),
+    'show more format tips link' => array(
+      'title' => t('Show more format tips link'),
+      'description' => t('Toggle display of the "More information about text formats" link.'),
+    ),
+    'view filter tips' => array(
+      'title' => t('View filter tips'),
+      'description' => t('Allow user to view the filter tips pages')
+    ),
+    'view core filter tips' => array(
+      'title' => t('View core filter tips'),
+      'description' => t('Allow user to view the core filter tips pages')
+    )
+  );
+  foreach ($entities as $type => $info) {
+    if ($info['fieldable']) {
+      $perms['show format selection for ' . $type] = array(
+        'title' => t('Show format selection for @entitys', array('@entity' => $type)),
+      );
+    }
+  }
+
+  return $perms;
+}
+
+/**
+ * Implements hook_menu().
+ */
+function format_control_menu() {
+  $items = array();
+
+  $items['admin/config/content/formats/settings'] = array(
+    'title' => 'Format Control',
+    'description' => 'Manage format control defaults',
+    'page callback' => 'format_control_admin_page',
+    'access arguments' => array('administer filters'),
+    'type' => MENU_LOCAL_TASK,
+    'weight' => 3,
+    'file' => 'format_control.admin.inc',
+  );
+
+  $items['admin/config/content/formats/settings/defaults/%fc_entity'] = array(
+    'title' => 'Format Control Entity Default',
+    'description' => 'Set defaults for each entity',
+    'page arguments' => array('format_control_default_settings_form', 6),
+    'page callback' => 'drupal_get_form',
+    'access arguments' => array('administer filters'),
+    'file' => 'format_control.admin.inc',
+  );
+
+  $items['filter/tips/%filter_format'] = array(
+    'title callback' => 'format_control_format_tips_title',
+    'title arguments' => array(2),
+    'page callback' => 'format_control_tips_page',
+    'page arguments' => array(2),
+    'access arguments' => array('view filter tips'),
+    'file' => 'format_control.pages.inc',
+    'type' => MENU_CALLBACK
+  );
+  return $items;
+}
+
+function format_control_format_tips_title($format) {
+  return t('!format Formatting Guidelines', array('!format' => $format->name));
+}
+
+function format_control_menu_alter(&$menu) {
+  // Override core access checking of filter/tips page
+
+  unset($menu['filter/tips']['access callback']);
+  $menu['filter/tips']['access arguments'] = array('view core filter tips');
+}
+
+function fc_entity_load($entity) {
+
+  return entity_get_info($entity) ? $entity : FALSE;
+}
+
+/**
+ * Implements of hook_element_info_alter().
+ */
+function format_control_element_info_alter(&$type) {
+  // Change text format processing on elements to our version.
+  if (isset($type['text_format']['#process'])) {
+    foreach ($type['text_format']['#process'] as &$callback) {
+      if ($callback === 'filter_process_format') {
+        $callback = 'format_control_filter_process_format';
+      }
+    }
+  }
+}
+
+/**
+ * Taken directly from filter_process_format() and modified.
+ * @see filter_process_format()
+ *
+ * Expands an element into a base element with text format selector attached.
+ *
+ * The form element will be expanded into two separate form elements, one
+ * holding the original element, and the other holding the text format selector:
+ * - value: Holds the original element, having its #type changed to the value of
+ *   #base_type or 'textarea' by default.
+ * - format: Holds the text format fieldset and the text format selection, using
+ *   the text format id specified in #format or the user's default format by
+ *   default, if NULL.
+ *
+ * The resulting value for the element will be an array holding the value and the
+ * format.  For example, the value for the body element will be:
+ * @code
+ *   $form_state['values']['body']['value'] = 'foo';
+ *   $form_state['values']['body']['format'] = 'foo';
+ * @endcode
+ *
+ * @param $element
+ *   The form element to process. Properties used:
+ *   - #base_type: The form element #type to use for the 'value' element.
+ *     'textarea' by default.
+ *   - #format: (optional) The text format id to preselect. If NULL or not set,
+ *     the default format for the current user will be used.
+ *
+ * @return
+ *   The expanded element.
+ */
+function format_control_filter_process_format($element) {
+  global $user;
+
+  $instances = field_info_instances($element['#entity_type'], $element['#bundle']);
+  // We check if this field is using overriden settings.
+  if ((isset($instances[$element['#field_name']]['settings']['format_control']) && $instances[$element['#field_name']]['settings']['format_control']['settings']['override'])) {
+    $settings = $instances[$element['#field_name']]['settings']['format_control'];
+  } else {
+    // Either the override checkbox isn't set for this field or there are no settings so we look for the bundle default.
+    $settings = variable_get('format_control_default_' . $element['#entity_type'], array());
+    if (isset($settings['format_control'])) {
+      $settings = $settings['format_control'];
+    }
+  }
+
+  $show_selection = TRUE;
+  if (isset($element['#entity_type'])) {
+    $show_selection = user_access('show format selection for ' . $element['#entity_type']);
+  }
+
+  $show_tips = user_access('show format tips');
+  $show_tips_link = user_access('show more format tips link');
+  $tips_dialog = FALSE;
+  if (isset($settings['settings'])) {
+    $show_tips = $settings['settings']['show_tips'];
+    $show_tips_link = $settings['settings']['show_more_tips_link'];
+
+    $tips_dialog = module_exists('ctools') && $settings['settings']['show_more_tips_dialog'];
+  }
+  // Ensure that children appear as subkeys of this element.
+  $element['#tree'] = TRUE;
+  $blacklist = array(
+    // Make form_builder() regenerate child properties.
+    '#parents',
+    '#id',
+    '#name',
+    // Do not copy this #process function to prevent form_builder() from
+    // recursing infinitely.
+    '#process',
+    // Description is handled by theme_text_format_wrapper().
+    '#description',
+    // Ensure proper ordering of children.
+    '#weight',
+    // Properties already processed for the parent element.
+    '#prefix',
+    '#suffix',
+    '#attached',
+    '#processed',
+    '#theme_wrappers',
+  );
+  // Move this element into sub-element 'value'.
+  unset($element['value']);
+  foreach (element_properties($element) as $key) {
+    if (!in_array($key, $blacklist)) {
+      $element['value'][$key] = $element[$key];
+    }
+  }
+
+  $element['value']['#type'] = $element['#base_type'];
+  $element['value'] += element_info($element['#base_type']);
+
+  // Turn original element into a text format wrapper.
+  $path = drupal_get_path('module', 'filter');
+  $element['#attached']['js'][] = $path . '/filter.js';
+  $element['#attached']['css'][] = $path . '/filter.css';
+
+  // Setup child container for the text format widget.
+  $attributes = array('class' => array('filter-wrapper'));
+  if (!$show_selection && !$show_tips && !$show_tips_link) {
+    $attributes['style'] = isset($attributes['style']) ? $attributes['style'] . '; display: none;' : 'display: none;';
+  }
+  $element['format'] = array(
+    '#type' => 'fieldset',
+    '#attributes' => $attributes,
+  );
+
+  // Use the default format for this user if none was selected.
+  if (!isset($element['#format'])) {
+    $element['#format'] = filter_default_format($user);
+  }
+
+  // Prepare text format guidelines.
+  $element['format']['guidelines'] = array(
+    '#type' => 'container',
+    '#attributes' => array('class' => array('filter-guidelines')),
+    '#weight' => 20,
+  );
+  // Get a list of formats that the current user has access to.
+  $formats = filter_formats($user);
+  $options = array();
+
+  // Set our weights on our formats
+  foreach ($formats as &$format) {
+    $format->weight = isset($settings['formats'][$format->format]) ? $settings['formats'][$format->format]['weight'] : $format->weight;
+  }
+  uasort($formats, '_format_control_sort');
+
+  foreach ($formats as $format) {
+    // If not showing selection remove all formats except default.
+    if ($format->format !== $element['#format'] && !$show_selection) {
+      continue;
+    }
+    if (!isset($settings['formats'][$format->format]) || !$settings['formats'][$format->format]['disable']) {
+      $options[$format->format] = $format->name;
+    }
+    if ($show_tips) {
+      $element['format']['guidelines'][$format->format] = array(
+        '#theme' => 'filter_guidelines',
+        '#format' => $format,
+      );
+    }
+  }
+  // If no #default_value then we assume this is a new item, so we set #format to the first item key in our options array.
+  if (empty($element['#default_value'])) {
+    $default = array_shift(array_keys($options));
+    $element['#format'] = $default;
+  }
+
+  $element['format']['format'] = array(
+    '#type' => 'select',
+    '#title' => t('Text format'),
+    '#options' => $options,
+    '#default_value' => $element['#format'],
+    '#access' => $show_selection ? count($formats) > 1 : FALSE,
+    '#weight' => 10,
+    '#attributes' => array('class' => array('filter-list')),
+    '#parents' => array_merge($element['#parents'], array('format')),
+  );
+
+  if ($show_tips_link) {
+    $classes = array('filter-help');
+    if ($tips_dialog) {
+      $classes[] = 'format-control-dialog-link';
+      ctools_include('modal');
+      ctools_modal_add_js();
+      drupal_add_js(drupal_get_path('module', 'format_control') . '/js/format-control-link.js');
+    }
+    $element['format']['help'] = array(
+      '#type' => 'container',
+      '#theme' => 'filter_tips_more_info',
+      '#attributes' => array('class' => $classes),
+      '#weight' => 0,
+    );
+  }
+
+  // Hide fieldset if not showing selector or tips.
+  if (!$show_selection && !$show_tips && !$show_tips_link) {
+    //$element['format']['#access'] = FALSE;
+  }
+
+  $all_formats = filter_formats();
+  $format_exists = isset($all_formats[$element['#format']]);
+  $user_has_access = isset($formats[$element['#format']]);
+  $user_is_admin = user_access('administer filters');
+
+  // If the stored format does not exist, administrators have to assign a new
+  // format.
+  if (!$format_exists && $user_is_admin) {
+    $element['format']['format']['#required'] = TRUE;
+    $element['format']['format']['#default_value'] = NULL;
+    // Force access to the format selector (it may have been denied above if
+    // the user only has access to a single format).
+    $element['format']['format']['#access'] = TRUE;
+  }
+  // Disable this widget, if the user is not allowed to use the stored format,
+  // or if the stored format does not exist. The 'administer filters' permission
+  // only grants access to the filter administration, not to all formats.
+  elseif (!$user_has_access || !$format_exists) {
+    // Overload default values into #value to make them unalterable.
+    $element['value']['#value'] = $element['value']['#default_value'];
+    $element['format']['format']['#value'] = $element['format']['format']['#default_value'];
+
+    // Prepend #pre_render callback to replace field value with user notice
+    // prior to rendering.
+    $element['value'] += array('#pre_render' => array());
+    array_unshift($element['value']['#pre_render'], 'filter_form_access_denied');
+
+    // Cosmetic adjustments.
+    if (isset($element['value']['#rows'])) {
+      $element['value']['#rows'] = 3;
+    }
+    $element['value']['#disabled'] = TRUE;
+    $element['value']['#resizable'] = FALSE;
+
+    // Hide the text format selector and any other child element (such as text
+    // field's summary).
+    foreach (element_children($element) as $key) {
+      if ($key != 'value') {
+        $element[$key]['#access'] = FALSE;
+      }
+    }
+  }
+
+  return $element;
+}
+
+/**
+ * Sort our formats by weight
+ */
+function _format_control_sort($a, $b) {
+  return $a->weight > $b->weight;
+}
+
+/**
+ * Implements hook_form_FORM_ID_alter().
+ */
+function format_control_form_field_ui_field_edit_form_alter(&$form, &$form_state, $form_id) {
+  // Only alter fields with text processing and if admin has chosen.
+
+  $text_processing = isset($form['#instance']['settings']['text_processing']) ? $form['#instance']['settings']['text_processing'] : NULL;
+  if ($text_processing == 1) {
+    $defaults = variable_get('format_control_default_' . $form['#instance']['entity_type'], array());
+    if (isset($defaults['format_control'])) {
+      $defaults = $defaults['format_control'];
+    }
+    $settings = isset($form['#instance']['settings']['format_control']) ? $form['#instance']['settings']['format_control'] : $defaults;
+    // Add in our formats table
+    $form['instance']['settings'] += format_control_format_table($settings);
+    $form['instance']['settings']['format_control']['settings']['override'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Override default formats'),
+      '#default_value' => isset($settings['settings']['override']) ? $settings['settings']['override'] : 0,
+    );
+  }
+}
+
+/**
+ * Helper function to generate our draggable table form for format lists
+ * 
+ * @param $defaults
+ *   A keyed array of the default values for the form
+ */
+function format_control_format_table($defaults) {
+  $formats = filter_formats();
+  $form = array();
+  $form['format_control'] = array(
+    '#tree' => TRUE,
+    '#type' => 'fieldset',
+    '#title' => t('Input Formats'),
+  );
+  $form['format_control']['formats'] = array('#theme' => 'format_control_filter_table');
+  foreach ($formats as $key => $format) {
+    $form['format_control']['formats'][$key]['name'] = array('#markup' => $format->name);
+    $form['format_control']['formats'][$key]['weight'] = array(
+      '#type' => 'weight',
+      '#default_value' => isset($defaults['formats'][$key]) ? $defaults['formats'][$key]['weight'] : 0,
+      '#delta' => 50,
+    );
+
+    $form['format_control']['formats'][$key]['disable'] = array(
+      '#type' => 'checkbox',
+      '#default_value' => isset($defaults['formats'][$key]) ? $defaults['formats'][$key]['disable'] : 0,
+    );
+
+    $form['format_control']['formats'][$key]['#weight'] = isset($defaults['formats'][$key]) ? $defaults['formats'][$key]['weight'] : 0;
+  }
+
+  $form['format_control']['settings'] = array(
+    '#type' => 'fieldset',
+    '#title' => t('Settings')
+  );
+
+  $form['format_control']['settings']['show_tips'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Show Formatting Tips'),
+    '#default_value' => isset($defaults['settings']['show_tips']) ? $defaults['settings']['show_tips'] : 1,
+  );
+  $form['format_control']['settings']['show_more_tips_link'] = array(
+    '#type' => 'checkbox',
+    '#title' => t('Show More Tips Link'),
+    '#default_value' => isset($defaults['settings']['show_more_tips_link']) ? $defaults['settings']['show_more_tips_link'] : 1,
+  );
+  if (module_exists('ctools')) {
+    $form['format_control']['settings']['show_more_tips_dialog'] = array(
+      '#type' => 'checkbox',
+      '#title' => t('Show More Tips In A Popup Dialog'),
+      '#default_value' => isset($defaults['settings']['show_more_tips_dialog']) ? $defaults['settings']['show_more_tips_dialog'] : 0,
+    );
+  }
+  return $form;
+}

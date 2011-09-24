@@ -1,0 +1,7 @@
+; $Id$ 
+name = Format Control
+description = Provides fine tuned control over input formats on a per entity and per field basis
+package = Other
+version = 7.x-1.0-beta
+core = 7.x
+php = 5.2.x
