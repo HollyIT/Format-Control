@@ -152,7 +152,11 @@ function format_control_element_info_alter(&$type) {
  */
 function format_control_filter_process_format($element) {
   global $user;
-
+  
+  // Format control only works on entities
+  if (!isset($element['#entity_type'])){
+    return;
+  }
   $instances = field_info_instances($element['#entity_type'], $element['#bundle']);
   // We check if this field is using overriden settings.
   if ((isset($instances[$element['#field_name']]['settings']['format_control']) && $instances[$element['#field_name']]['settings']['format_control']['settings']['override'])) {
